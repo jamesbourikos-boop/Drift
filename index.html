@@ -20,6 +20,7 @@ button:focus-visible{outline:3px solid var(--fg);outline-offset:2px}
 #status{padding:10px 12px;background:var(--panel);border-left:4px solid var(--acc);margin:12px 0}
 pre{background:var(--panel);border:1px solid var(--bd);padding:10px;height:240px;overflow:auto;font-size:.8rem;white-space:pre-wrap;margin:0}
 small{color:var(--mut)}
+input[type=checkbox]{width:22px;height:22px;vertical-align:middle;margin-right:8px}
 h2{font-size:1.15rem;font-weight:600;margin:22px 0 8px}
 #pad{width:100%;max-width:480px;aspect-ratio:1;display:block;touch-action:none;border-radius:50%;background:var(--panel);border:1px solid var(--bd)}
 [hidden]{display:none!important}
@@ -50,6 +51,8 @@ input[type=color]{width:64px;height:44px;border:1px solid var(--bd);background:v
   <button id="clear" class="alt">Clear</button>
   <button id="send" disabled>Send drawing</button>
 </div>
+<label><input type="checkbox" id="clean" checked> Clean the sand first</label>
+<div class="row"><button id="cleanonly" class="alt" disabled>Clean only</button></div>
 <p id="info">Draw inside the circle. Lifting your finger and starting again joins the strokes with a straight line.</p>
 <label>Speed <input id="spd" type="range" min="0" max="100" value="50" disabled></label>
 <label>Brightness <input id="brt" type="range" min="0" max="100" value="50" disabled></label>
@@ -78,7 +81,7 @@ const hex=a=>[...a].map(b=>b.toString(16).padStart(2,'0')).join(' ');
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const u16=v=>[v&255,(v>>8)&255];
 const u32=v=>[v&255,(v>>8)&255,(v>>16)&255,(v>>>24)&255];
-const CTL=['draw','send','pp','next','spd','brt','col','setcol','shift','breath','pon','poff'];
+const CTL=['draw','send','cleanonly','pp','next','spd','brt','col','setcol','shift','breath','pon','poff'];
 function setStatus(t){$('status').textContent=t;CTL.forEach(i=>$(i).disabled=!ready||busy)}
 function pkt(cmd,data){const a=[0x7b,data.length+4,cmd&0x7f,...data];let s=0;for(const b of a)s+=b;a.push(s&255);return new Uint8Array(a)}
 const ALARMS={8:'motor driver error',9:'SD card init failed',10:'cannot open pattern file',11:'cannot read pattern file',12:'cannot close pattern file',13:'cannot delete pattern file',14:'file seek failed',15:'position reset failed',16:'homing failed',17:'cannot create received file'};
@@ -168,8 +171,24 @@ $('c1').onclick=()=>connect(false);
 $('c2').onclick=()=>connect(true);
 $('pp').onclick=()=>send(pkt(0x14,[3]));
 $('next').onclick=()=>send(pkt(0x14,[4]));
-async function sendPath(pts,name){
+const CLEAN_TURNS=30,CLEAN_STEP=8,MAXTOTAL=5000;
+const wire=(t,r)=>[Math.min(Math.round((((t%360)+360)%360)*1000/6),59999),Math.round(Math.min(r,1)*50000)];
+function cleanPts(toRim){
+  const n=Math.round(CLEAN_TURNS*360/CLEAN_STEP),c=[];
+  for(let i=0;i<=n;i++){const f=i/n;c.push(wire(f*CLEAN_TURNS*360,(toRim?f:1-f)*0.98))}
+  return c;
+}
+function withClean(pts){
+  const rho0=pts[0][1]/50000,th0=pts[0][0]*6/1000,c=cleanPts(rho0>0.5),last=c[c.length-1];
+  const tha=last[0]*6/1000,rha=last[1]/50000,delta=(((th0-tha)%360)+540)%360-180;
+  const n=Math.max(1,Math.ceil(Math.abs(delta)/15),Math.ceil(Math.abs(rho0-rha)/0.05)),link=[];
+  for(let k=1;k<n;k++)link.push(wire(tha+delta*k/n,rha+(rho0-rha)*k/n));
+  return c.concat(link,pts);
+}
+async function sendPath(pts,name,noClean){
   if(fatal.length){showWarn();setStatus('Restart the table first (see the warning).');return}
+  if(!noClean&&$('clean').checked){pts=withClean(pts);name='clean + '+name}
+  if(pts.length>MAXTOTAL){setStatus('Path is too long ('+pts.length+' points). Simplify the drawing.');return}
   const id=curId===50000?50001:50000;log('Table is drawing '+curId+'; uploading '+name+' to '+id);
   busy=true;setStatus('Uploading '+name+' to slot '+id+'...');
   try{
@@ -180,6 +199,7 @@ async function sendPath(pts,name){
   }catch(e){busy=false;setStatus('Upload failed: '+e.message);log('Error: '+e.message)}
 }
 $('draw').onclick=()=>sendPath(spiral(),'spiral');
+$('cleanonly').onclick=()=>sendPath(cleanPts(false),'clean',true);
 
 let shiftOn=false,breathOn=false;
 const bright=()=>+$('brt').value;
