@@ -52,6 +52,7 @@ input[type=color]{width:64px;height:44px;border:1px solid var(--bd);background:v
   <button id="pon" class="alt" disabled>Power on</button>
   <button id="poff" class="alt" disabled>Power off</button>
 </div>
+<div class="row"><button id="copy" class="alt">Copy log</button></div>
 <pre id="log"></pre>
 <p><small>Unofficial and at your own risk. Not tested on the 21 inch table. Protocol from the Drifted project docs.</small></p>
 <script>
@@ -146,6 +147,7 @@ async function upload(id,pts){
   throw new Error('Upload did not complete');
 }
 
+$('copy').onclick=async()=>{try{await navigator.clipboard.writeText($('log').textContent);$('copy').textContent='Copied'}catch(e){$('copy').textContent='Copy failed: select the log text by hand'}setTimeout(()=>$('copy').textContent='Copy log',2500)};
 $('c1').onclick=()=>connect(false);
 $('c2').onclick=()=>connect(true);
 $('pp').onclick=()=>send(pkt(0x14,[3]));
