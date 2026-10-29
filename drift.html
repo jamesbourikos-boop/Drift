@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Drift table controller</title>
+<style>
+:root{--bg:#f3ece0;--fg:#2a2620;--mut:#6f665a;--panel:#e8dfce;--acc:#3d5a6c;--accfg:#fff;--bd:#cfc3ac;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);color-scheme:light}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#1c1a17;--fg:#ece4d4;--mut:#a3998a;--panel:#292622;--acc:#9cc0d4;--accfg:#14212a;--bd:#3d3830;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#1c1a17;--fg:#ece4d4;--mut:#a3998a;--panel:#292622;--acc:#9cc0d4;--accfg:#14212a;--bd:#3d3830;color-scheme:dark}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 Georgia,"Times New Roman",serif;padding:20px 16px 32px;max-width:560px}
+h1{font-size:1.7rem;font-weight:600;margin:0 0 4px}
+p{margin:0 0 12px;color:var(--mut)}
+.row{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0}
+button{font:inherit;padding:11px 16px;border-radius:6px;border:1px solid var(--acc);background:var(--acc);color:var(--accfg);min-height:44px}
+button.alt{background:transparent;color:var(--acc)}
+button:disabled{opacity:.4}
+button:focus-visible{outline:3px solid var(--fg);outline-offset:2px}
+#status{padding:10px 12px;background:var(--panel);border-left:4px solid var(--acc);margin:12px 0}
+pre{background:var(--panel);border:1px solid var(--bd);padding:10px;height:240px;overflow:auto;font-size:.8rem;white-space:pre-wrap;margin:0}
+small{color:var(--mut)}
+</style>
+</head>
+<body>
+<h1>Drift table controller</h1>
+<p>Step 2: connect, handshake, and draw a test spiral. Close the HoMedics app first. Works in Chrome on Android.</p>
+<div id="status">Not connected</div>
+<div class="row">
+  <button id="c1">Connect</button>
+  <button id="c2" class="alt">Show all devices</button>
+</div>
+<div class="row">
+  <button id="draw" disabled>Draw test spiral</button>
+  <button id="pp" class="alt" disabled>Play / pause</button>
+</div>
+<pre id="log"></pre>
+<p><small>Unofficial and at your own risk. Not tested on the 21 inch table. Protocol from the Drifted project docs.</small></p>
+<script>
+const SVC='0000ffe0-0000-1000-8000-00805f9b34fb',WR='0000ffe9-0000-1000-8000-00805f9b34fb',NT='0000ffe4-0000-1000-8000-00805f9b34fb';
+const $=id=>document.getElementById(id);
+const CONFIRM=new Uint8Array([0x7b,4,0xd0,0x4f]);
+let wch=null,buf=[],ready=false,waiter=null,q=Promise.resolve(),slot=0;
+const log=m=>{const l=$('log');l.textContent+=m+'\n';l.scrollTop=l.scrollHeight};
+const hex=a=>[...a].map(b=>b.toString(16).padStart(2,'0')).join(' ');
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const u16=v=>[v&255,(v>>8)&255];
+const u32=v=>[v&255,(v>>8)&255,(v>>16)&255,(v>>>24)&255];
+function setStatus(t){$('status').textContent=t;$('draw').disabled=!ready;$('pp').disabled=!ready}
+function pkt(cmd,data){const a=[0x7b,data.length+4,cmd&0x7f,...data];let s=0;for(const b of a)s+=b;a.push(s&255);return new Uint8Array(a)}
+function send(p){q=q.then(()=>wch.writeValueWithoutResponse(p)).catch(e=>log('Write error: '+e.message));return q}
+function timePkt(){const d=new Date();return pkt(0x12,[2,d.getFullYear()%100,d.getMonth(),d.getDate(),d.getHours(),d.getMinutes(),d.getSeconds(),d.getDay()||7])}
+function waitFor(test,ms){return new Promise(res=>{const t=setTimeout(()=>{waiter=null;res(null)},ms);waiter={test,res:m=>{clearTimeout(t);res(m)}}})}
+
+function onData(ev){
+  const v=new Uint8Array(ev.target.value.buffer);
+  buf.push(...v);
+  while(buf.length){
+    if(buf[0]!==0x7b){buf.shift();continue}
+    if(buf.length<2)break;
+    const len=buf[1];
+    if(len<4||len>=200){buf.shift();continue}
+    if(buf.length<len)break;
+    handle(buf.splice(0,len));
+  }
+}
+function handle(p){
+  let s=0;for(let i=0;i<p.length-1;i++)s+=p[i];
+  if((s&255)!==p[p.length-1]){log('Bad checksum: '+hex(p));return}
+  const ackCmd=p[2],cmd=ackCmd&0x7f,ack=!!(ackCmd&0x80),data=p.slice(3,p.length-1),action=data[0];
+  const msg={cmd,ack,action,data};
+  if(cmd===0x50&&ack){/* table's own confirm: do not answer */}
+  else if(cmd===0x50&&action===1){send(pkt(0x50,[2,1]))}
+  else if(cmd===0x32&&action===2){send(timePkt())}
+  else{send(CONFIRM);if(cmd===0x4f&&action===1){ready=true;setStatus('Ready. Session established.')}}
+  if(cmd!==0x35)log('< '+hex(p));
+  if(waiter&&waiter.test(msg)){const w=waiter;waiter=null;w.res(msg)}
+}
+
+async function connect(all){
+  try{
+    const opts=all?{acceptAllDevices:true,optionalServices:[SVC]}:{filters:[{namePrefix:'KS'}],optionalServices:[SVC]};
+    const dev=await navigator.bluetooth.requestDevice(opts);
+    dev.addEventListener('gattserverdisconnected',()=>{ready=false;setStatus('Disconnected');log('Disconnected')});
+    setStatus('Connecting...');
+    const s=await(await dev.gatt.connect()).getPrimaryService(SVC);
+    wch=await s.getCharacteristic(WR);
+    const n=await s.getCharacteristic(NT);
+    n.addEventListener('characteristicvaluechanged',onData);
+    await n.startNotifications();
+    setStatus('Connected. Waiting for handshake...');
+  }catch(e){setStatus('Connection failed: '+e.message);log('Error: '+e.message)}
+}
+
+function spiral(){
+  const pts=[],N=200,turns=4;
+  for(let i=0;i<=N;i++){const f=i/N,deg=(f*turns*360)%360;
+    pts.push([Math.min(Math.round(deg*1000/6),59999),Math.round(f*50000)])}
+  return pts;
+}
+
+async function upload(id,pts){
+  const pages=Math.ceil(pts.length/40);
+  const page=i=>{const sl=pts.slice(i*40,i*40+40),d=[1,sl.length,...u16(i+1)];for(const[t,r]of sl)d.push(...u16(t),...u16(r));return pkt(0x53,d)};
+  let ok=false;
+  for(let k=0;k<3&&!ok;k++){const w=waitFor(m=>m.cmd===0x34&&m.action===2,4000);await send(pkt(0x13,[1,...u16(id),...u32(pages)]));ok=!!(await w)}
+  if(!ok)throw new Error('The table did not acknowledge the upload start');
+  let pending=[...Array(pages).keys()],extra=1;
+  for(let round=0;round<8;round++){
+    for(const i of pending){await send(page(i));await sleep(100)}
+    await sleep(100);
+    const w=waitFor(m=>m.cmd===0x34&&[1,3,5,6].includes(m.action),15000);
+    await send(pkt(0x13,[2,...u16(id),...u32(pages)]));
+    const m=await w;
+    if(!m)throw new Error('No reply after the last page');
+    if(m.action===3)return;
+    if(m.action===5)throw new Error('The table reported the upload failed');
+    if(m.action===6)throw new Error('The table is out of storage');
+    const n=m.data[1],miss=[];
+    for(let j=0;j<n;j++)miss.push(m.data[2+2*j]|(m.data[3+2*j]<<8));
+    if(miss.length){pending=miss.map(x=>x-1);await sleep(200)}
+    else{extra=Math.min(extra*2,pages);pending=[...Array(extra).keys()].map(x=>pages-extra+x)}
+  }
+  throw new Error('Upload did not complete');
+}
+
+$('c1').onclick=()=>connect(false);
+$('c2').onclick=()=>connect(true);
+$('pp').onclick=()=>send(pkt(0x14,[3]));
+$('draw').onclick=async()=>{
+  const id=50000+slot;slot=1-slot;
+  $('draw').disabled=true;
+  try{
+    setStatus('Uploading spiral to slot '+id+'...');
+    await upload(id,spiral());
+    await send(pkt(0x14,[1,...u16(id)]));
+    setStatus('Drawing spiral (slot '+id+')');
+  }catch(e){setStatus('Upload failed: '+e.message);log('Error: '+e.message)}
+  $('draw').disabled=!ready;
+};
+if(!navigator.bluetooth)setStatus('Web Bluetooth is not available here. Open this page in Chrome on Android.');
+</script>
+</body>
+</html>
