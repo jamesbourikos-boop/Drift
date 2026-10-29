@@ -20,6 +20,8 @@ button:focus-visible{outline:3px solid var(--fg);outline-offset:2px}
 #status{padding:10px 12px;background:var(--panel);border-left:4px solid var(--acc);margin:12px 0}
 pre{background:var(--panel);border:1px solid var(--bd);padding:10px;height:240px;overflow:auto;font-size:.8rem;white-space:pre-wrap;margin:0}
 small{color:var(--mut)}
+[hidden]{display:none!important}
+#warn{padding:10px 12px;background:var(--panel);border-left:4px solid #b3412e;margin:12px 0}
 label{display:block;margin:10px 0}
 input[type=range]{width:100%;min-height:32px}
 input[type=color]{width:64px;height:44px;border:1px solid var(--bd);background:var(--panel)}
@@ -29,6 +31,7 @@ input[type=color]{width:64px;height:44px;border:1px solid var(--bd);background:v
 <h1>Drift table controller</h1>
 <p>Step 2: connect, handshake, and draw a test spiral. Close the HoMedics app first. Works in Chrome on Android.</p>
 <div id="status">Not connected</div>
+<div id="warn" hidden></div>
 <div class="row">
   <button id="c1">Connect</button>
   <button id="c2" class="alt">Show all devices</button>
@@ -59,7 +62,7 @@ input[type=color]{width:64px;height:44px;border:1px solid var(--bd);background:v
 const SVC='0000ffe0-0000-1000-8000-00805f9b34fb',WR='0000ffe9-0000-1000-8000-00805f9b34fb',NT='0000ffe4-0000-1000-8000-00805f9b34fb';
 const $=id=>document.getElementById(id);
 const CONFIRM=new Uint8Array([0x7b,4,0xd0,0x4f]);
-let wch=null,buf=[],ready=false,waiter=null,q=Promise.resolve(),curId=0;
+let wch=null,buf=[],ready=false,waiter=null,q=Promise.resolve(),curId=0,fatal=[];
 const log=m=>{const l=$('log');l.textContent+=m+'\n';l.scrollTop=l.scrollHeight};
 const hex=a=>[...a].map(b=>b.toString(16).padStart(2,'0')).join(' ');
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
@@ -68,8 +71,10 @@ const u32=v=>[v&255,(v>>8)&255,(v>>16)&255,(v>>>24)&255];
 const CTL=['draw','pp','next','spd','brt','col','setcol','shift','breath','pon','poff'];
 function setStatus(t){$('status').textContent=t;CTL.forEach(i=>$(i).disabled=!ready)}
 function pkt(cmd,data){const a=[0x7b,data.length+4,cmd&0x7f,...data];let s=0;for(const b of a)s+=b;a.push(s&255);return new Uint8Array(a)}
+const ALARMS={8:'motor driver error',9:'SD card init failed',10:'cannot open pattern file',11:'cannot read pattern file',12:'cannot close pattern file',13:'cannot delete pattern file',14:'file seek failed',15:'position reset failed',16:'homing failed',17:'cannot create received file'};
+function showWarn(){const w=$('warn');if(!fatal.length){w.hidden=true;return}w.hidden=false;w.textContent='The table reports a fatal alarm: '+fatal.map(c=>c+' ('+(ALARMS[c]||'unknown')+')').join(', ')+'. It stays until the table is restarted. Turn the table off and on, then reconnect.'}
 function runState(d){let i=1;const str=()=>{while(i<d.length&&d[i]!==0)i++;i++};i++;str();i+=3;i++;str();return d[i]|(d[i+1]<<8)}
-function send(p){if(p.length<40)log('> '+hex(p));q=q.then(()=>wch.writeValueWithoutResponse(p)).catch(e=>log('Write error: '+e.message));return q}
+function send(p){if(p.length<40&&p!==CONFIRM)log('> '+hex(p));q=q.then(()=>wch.writeValueWithoutResponse(p)).catch(e=>log('Write error: '+e.message));return q}
 function timePkt(){const d=new Date();return pkt(0x12,[2,d.getFullYear()%100,d.getMonth(),d.getDate(),d.getHours(),d.getMinutes(),d.getSeconds(),d.getDay()||7])}
 function waitFor(test,ms){return new Promise(res=>{const t=setTimeout(()=>{waiter=null;res(null)},ms);waiter={test,res:m=>{clearTimeout(t);res(m)}}})}
 
@@ -95,7 +100,8 @@ function handle(p){
   else if(cmd===0x32&&action===2){send(timePkt())}
   else{send(CONFIRM);if(cmd===0x4f&&action===1){ready=true;setStatus('Ready. Session established.')}}
   if(cmd===0x35&&action===1){try{curId=runState(data)}catch(e){}}
-  if(cmd!==0x35)log('< '+hex(p));
+  if(cmd===0x37&&action===1){const n=data[1],codes=[];for(let j=0;j<n;j++)codes.push(data[2+2*j]|(data[3+2*j]<<8));if(codes.join()!==fatal.join()){fatal=codes;log('FATAL ALARM codes: '+codes.join(', '));showWarn()}}
+  if(cmd!==0x35&&cmd!==0x37&&!(cmd===0x50&&ack))log('< '+hex(p));
   if(waiter&&waiter.test(msg)){const w=waiter;waiter=null;w.res(msg)}
 }
 
@@ -104,7 +110,7 @@ async function connect(all){
     const opts=all?{acceptAllDevices:true,optionalServices:[SVC]}:{filters:[{namePrefix:'KS'}],optionalServices:[SVC]};
     const dev=await navigator.bluetooth.requestDevice(opts);
     dev.addEventListener('gattserverdisconnected',()=>{ready=false;setStatus('Disconnected');log('Disconnected')});
-    setStatus('Connecting...');
+    fatal=[];showWarn();setStatus('Connecting...');
     const s=await(await dev.gatt.connect()).getPrimaryService(SVC);
     wch=await s.getCharacteristic(WR);
     const n=await s.getCharacteristic(NT);
@@ -153,6 +159,7 @@ $('c2').onclick=()=>connect(true);
 $('pp').onclick=()=>send(pkt(0x14,[3]));
 $('next').onclick=()=>send(pkt(0x14,[4]));
 $('draw').onclick=async()=>{
+  if(fatal.length){showWarn();setStatus('Restart the table first (see the warning).');return}
   const id=curId===50000?50001:50000;log('Table is drawing '+curId+'; uploading to '+id);
   $('draw').disabled=true;
   try{
