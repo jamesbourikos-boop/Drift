@@ -20,6 +20,8 @@ button:focus-visible{outline:3px solid var(--fg);outline-offset:2px}
 #status{padding:10px 12px;background:var(--panel);border-left:4px solid var(--acc);margin:12px 0}
 pre{background:var(--panel);border:1px solid var(--bd);padding:10px;height:240px;overflow:auto;font-size:.8rem;white-space:pre-wrap;margin:0}
 small{color:var(--mut)}
+h2{font-size:1.15rem;font-weight:600;margin:22px 0 8px}
+#pad{width:100%;max-width:480px;aspect-ratio:1;display:block;touch-action:none;border-radius:50%;background:var(--panel);border:1px solid var(--bd)}
 [hidden]{display:none!important}
 #warn{padding:10px 12px;background:var(--panel);border-left:4px solid #b3412e;margin:12px 0}
 label{display:block;margin:10px 0}
@@ -41,6 +43,14 @@ input[type=color]{width:64px;height:44px;border:1px solid var(--bd);background:v
   <button id="pp" class="alt" disabled>Play / pause</button>
   <button id="next" class="alt" disabled>Next pattern</button>
 </div>
+<h2>Draw your own</h2>
+<canvas id="pad"></canvas>
+<div class="row">
+  <button id="undo" class="alt">Undo stroke</button>
+  <button id="clear" class="alt">Clear</button>
+  <button id="send" disabled>Send drawing</button>
+</div>
+<p id="info">Draw inside the circle. Lifting your finger and starting again joins the strokes with a straight line.</p>
 <label>Speed <input id="spd" type="range" min="0" max="100" value="50" disabled></label>
 <label>Brightness <input id="brt" type="range" min="0" max="100" value="50" disabled></label>
 <div class="row">
@@ -62,14 +72,14 @@ input[type=color]{width:64px;height:44px;border:1px solid var(--bd);background:v
 const SVC='0000ffe0-0000-1000-8000-00805f9b34fb',WR='0000ffe9-0000-1000-8000-00805f9b34fb',NT='0000ffe4-0000-1000-8000-00805f9b34fb';
 const $=id=>document.getElementById(id);
 const CONFIRM=new Uint8Array([0x7b,4,0xd0,0x4f]);
-let wch=null,buf=[],ready=false,waiter=null,q=Promise.resolve(),curId=0,fatal=[];
+let wch=null,buf=[],ready=false,waiter=null,q=Promise.resolve(),curId=0,fatal=[],busy=false;
 const log=m=>{const l=$('log');l.textContent+=m+'\n';l.scrollTop=l.scrollHeight};
 const hex=a=>[...a].map(b=>b.toString(16).padStart(2,'0')).join(' ');
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const u16=v=>[v&255,(v>>8)&255];
 const u32=v=>[v&255,(v>>8)&255,(v>>16)&255,(v>>>24)&255];
-const CTL=['draw','pp','next','spd','brt','col','setcol','shift','breath','pon','poff'];
-function setStatus(t){$('status').textContent=t;CTL.forEach(i=>$(i).disabled=!ready)}
+const CTL=['draw','send','pp','next','spd','brt','col','setcol','shift','breath','pon','poff'];
+function setStatus(t){$('status').textContent=t;CTL.forEach(i=>$(i).disabled=!ready||busy)}
 function pkt(cmd,data){const a=[0x7b,data.length+4,cmd&0x7f,...data];let s=0;for(const b of a)s+=b;a.push(s&255);return new Uint8Array(a)}
 const ALARMS={8:'motor driver error',9:'SD card init failed',10:'cannot open pattern file',11:'cannot read pattern file',12:'cannot close pattern file',13:'cannot delete pattern file',14:'file seek failed',15:'position reset failed',16:'homing failed',17:'cannot create received file'};
 function showWarn(){const w=$('warn');if(!fatal.length){w.hidden=true;return}w.hidden=false;w.textContent='The table reports a fatal alarm: '+fatal.map(c=>c+' ('+(ALARMS[c]||'unknown')+')').join(', ')+'. It stays until the table is restarted. Turn the table off and on, then reconnect.'}
@@ -158,19 +168,19 @@ $('c1').onclick=()=>connect(false);
 $('c2').onclick=()=>connect(true);
 $('pp').onclick=()=>send(pkt(0x14,[3]));
 $('next').onclick=()=>send(pkt(0x14,[4]));
-$('draw').onclick=async()=>{
+async function sendPath(pts,name){
   if(fatal.length){showWarn();setStatus('Restart the table first (see the warning).');return}
-  const id=curId===50000?50001:50000;log('Table is drawing '+curId+'; uploading to '+id);
-  $('draw').disabled=true;
+  const id=curId===50000?50001:50000;log('Table is drawing '+curId+'; uploading '+name+' to '+id);
+  busy=true;setStatus('Uploading '+name+' to slot '+id+'...');
   try{
     await send(pkt(0x14,[10,0]));await send(pkt(0x14,[11,0]));
-    setStatus('Uploading spiral to slot '+id+'...');
-    await upload(id,spiral());
+    await upload(id,pts);
     await send(pkt(0x14,[1,...u16(id)]));
-    setStatus('Drawing spiral (slot '+id+')');
-  }catch(e){setStatus('Upload failed: '+e.message);log('Error: '+e.message)}
-  $('draw').disabled=!ready;
-};
+    busy=false;setStatus('Drawing '+name+' (slot '+id+')');
+  }catch(e){busy=false;setStatus('Upload failed: '+e.message);log('Error: '+e.message)}
+}
+$('draw').onclick=()=>sendPath(spiral(),'spiral');
+
 let shiftOn=false,breathOn=false;
 const bright=()=>+$('brt').value;
 const light=()=>send(pkt(0x11,[4,+shiftOn,...u16(10),+breathOn,bright()]));
@@ -188,6 +198,58 @@ $('setcol').onclick=async()=>{
   await send(pkt(0x14,[13,...new TextEncoder().encode('Temp'),0]));await sleep(300);
   await send(pkt(0x11,[4,0,0,0,0,bright()]));
 };
+const pad=$('pad'),cx=pad.getContext('2d');
+let strokes=[],cur=null,W=0;
+const css=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+function fit(){const r=pad.getBoundingClientRect(),d=window.devicePixelRatio||1;W=r.width;pad.width=Math.round(W*d);pad.height=Math.round(W*d);cx.setTransform(d,0,0,d,0,0);redraw()}
+function redraw(){
+  cx.clearRect(0,0,W,W);
+  cx.strokeStyle=css('--bd');cx.lineWidth=1;cx.setLineDash([]);
+  for(const f of [1/3,2/3]){cx.beginPath();cx.arc(W/2,W/2,f*W/2,0,7);cx.stroke()}
+  cx.beginPath();cx.moveTo(W/2,0);cx.lineTo(W/2,W);cx.moveTo(0,W/2);cx.lineTo(W,W/2);cx.stroke();
+  cx.strokeStyle=css('--acc');cx.lineWidth=3;cx.lineCap='round';cx.lineJoin='round';
+  cx.beginPath();for(const s of strokes){cx.moveTo(s[0][0],s[0][1]);for(const p of s)cx.lineTo(p[0],p[1])}cx.stroke();
+  cx.setLineDash([4,6]);cx.beginPath();
+  for(let i=1;i<strokes.length;i++){const a=strokes[i-1],b=strokes[i],e=a[a.length-1];cx.moveTo(e[0],e[1]);cx.lineTo(b[0][0],b[0][1])}
+  cx.stroke();cx.setLineDash([]);
+}
+function toPoints(){
+  const R=W/2;let xy=[];
+  for(const s of strokes)for(const p of s)xy.push([(p[0]-R)/R,(R-p[1])/R]);
+  if(!xy.length)return [];
+  xy=xy.map(([x,y])=>{const d=Math.hypot(x,y);return d>.98?[x*.98/d,y*.98/d]:[x,y]});
+  const sm=xy.map((p,i)=>i===0||i===xy.length-1?p:[(xy[i-1][0]+p[0]+xy[i+1][0])/3,(xy[i-1][1]+p[1]+xy[i+1][1])/3]);
+  const d=[sm[0]];
+  for(let i=1;i<sm.length;i++){const [x0,y0]=sm[i-1],[x1,y1]=sm[i],n=Math.max(1,Math.ceil(Math.hypot(x1-x0,y1-y0)/0.01));for(let k=1;k<=n;k++)d.push([x0+(x1-x0)*k/n,y0+(y1-y0)*k/n])}
+  const pts=[];let th=null,pr=0;
+  const push=(t,r)=>{const m=(((t%360)+360)%360)*1000;pts.push([Math.min(Math.round(m/6),59999),Math.round(Math.min(r,1)*50000)])};
+  for(const [x,y] of d){
+    const rho=Math.hypot(x,y),a=Math.atan2(y,x)*180/Math.PI;
+    if(th===null){th=a;pr=rho;push(th,rho);continue}
+    const delta=(((a-th)%360)+540)%360-180,n=Math.max(1,Math.ceil(Math.abs(delta)/15));
+    for(let k=1;k<=n;k++)push(th+delta*k/n,pr+(rho-pr)*k/n);
+    th+=delta;pr=rho;
+  }
+  return pts;
+}
+const MAXPTS=3000;
+function info(){
+  const n=toPoints().length;
+  $('info').textContent=n?(n+' points, about '+Math.ceil(n/40*0.1)+' s to upload.'+(n>MAXPTS?' Too long: clear or simplify the drawing.':'')):'Draw inside the circle. Lifting your finger and starting again joins the strokes with a straight line.';
+}
+const pos=e=>{const r=pad.getBoundingClientRect();return [e.clientX-r.left,e.clientY-r.top]};
+pad.onpointerdown=e=>{pad.setPointerCapture(e.pointerId);cur=[pos(e)];strokes.push(cur);redraw()};
+pad.onpointermove=e=>{if(!cur)return;cur.push(pos(e));redraw()};
+pad.onpointerup=pad.onpointercancel=()=>{cur=null;info()};
+$('undo').onclick=()=>{strokes.pop();redraw();info()};
+$('clear').onclick=()=>{strokes=[];redraw();info()};
+$('send').onclick=()=>{
+  const pts=toPoints();
+  if(pts.length<2){setStatus('Draw something first.');return}
+  if(pts.length>MAXPTS){setStatus('Drawing is too long. Clear or simplify it.');return}
+  sendPath(pts,'drawing');
+};
+window.addEventListener('resize',fit);fit();
 if(!navigator.bluetooth)setStatus('Web Bluetooth is not available here. Open this page in Chrome on Android.');
 </script>
 </body>
