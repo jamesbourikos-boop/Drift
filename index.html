@@ -20,6 +20,7 @@ button:focus-visible{outline:3px solid var(--fg);outline-offset:2px}
 #status{padding:10px 12px;background:var(--panel);border-left:4px solid var(--acc);margin:12px 0}
 pre{background:var(--panel);border:1px solid var(--bd);padding:10px;height:180px;overflow:auto;font-size:.8rem;white-space:pre-wrap;margin:0}
 small{color:var(--mut)}
+select{font:inherit;padding:8px;margin-left:8px;border:1px solid var(--bd);background:var(--panel);color:var(--fg);border-radius:6px}
 input[type=file]{width:100%;margin:6px 0 10px}
 input[type=checkbox]{width:22px;height:22px;vertical-align:middle;margin-right:8px}
 h2{font-size:1.15rem;font-weight:600;margin:22px 0 8px}
@@ -76,19 +77,21 @@ input[type=color]{width:64px;height:44px;border:1px solid var(--bd);background:v
   <button id="undo" class="alt">Undo stroke</button>
   <button id="clear" class="alt">Clear</button>
   <button id="send" disabled>Send drawing</button>
+  <button id="savedraw" class="alt">Save .txt</button>
 </div>
 <label><input type="checkbox" id="clean" checked> Clean the sand first</label>
 <div class="row"><button id="cleanonly" class="alt" disabled>Clean only</button></div>
 <p id="info">Draw inside the circle. Lifting your finger and starting again joins the strokes with a straight line.</p>
 <h2>Image to sand</h2>
 <input type="file" id="file" accept="image/*">
+<label>Style <select id="style"><option value="spiral">Shaded spiral</option><option value="outline">Outline (line art)</option></select></label>
 <label>Detail <input id="detail" type="range" min="10" max="40" value="24"></label>
 <label>Contrast <input id="contrast" type="range" min="50" max="200" value="100"></label>
 <label><input type="checkbox" id="inv"> Invert (light areas get stronger waves)</label>
 <canvas id="prev"></canvas>
 <p id="imginfo">Pick a bold, high-contrast picture such as a face or a logo. Darker areas get stronger waves in the sand.</p>
-<div class="row"><button id="sendimg" disabled>Send image</button></div>
-<p><small>Version 17. Unofficial and at your own risk. Protocol from the Drifted project docs. Tested on a 21 inch table (ST-400).</small></p>
+<div class="row"><button id="sendimg" disabled>Send image</button><button id="saveimg" class="alt">Save as pattern file (.txt)</button></div>
+<p><small>Version 18. Unofficial and at your own risk. Protocol from the Drifted project docs. Tested on a 21 inch table (ST-400).</small></p>
 <script>
 const SVC='0000ffe0-0000-1000-8000-00805f9b34fb',WR='0000ffe9-0000-1000-8000-00805f9b34fb',NT='0000ffe4-0000-1000-8000-00805f9b34fb';
 const $=id=>document.getElementById(id);
@@ -368,8 +371,11 @@ function toPoints(){
   if(!xy.length)return [];
   xy=xy.map(([x,y])=>{const d=Math.hypot(x,y);return d>.98?[x*.98/d,y*.98/d]:[x,y]});
   const sm=xy.map((p,i)=>i===0||i===xy.length-1?p:[(xy[i-1][0]+p[0]+xy[i+1][0])/3,(xy[i-1][1]+p[1]+xy[i+1][1])/3]);
+  return polarize(sm,0.01);
+}
+function polarize(sm,step){
   const d=[sm[0]];
-  for(let i=1;i<sm.length;i++){const [x0,y0]=sm[i-1],[x1,y1]=sm[i],n=Math.max(1,Math.ceil(Math.hypot(x1-x0,y1-y0)/0.01));for(let k=1;k<=n;k++)d.push([x0+(x1-x0)*k/n,y0+(y1-y0)*k/n])}
+  for(let i=1;i<sm.length;i++){const [x0,y0]=sm[i-1],[x1,y1]=sm[i],n=Math.max(1,Math.ceil(Math.hypot(x1-x0,y1-y0)/step));for(let k=1;k<=n;k++)d.push([x0+(x1-x0)*k/n,y0+(y1-y0)*k/n])}
   const pts=[];let th=null,pr=0;
   const push=(t,r)=>{const m=(((t%360)+360)%360)*1000;pts.push([Math.min(Math.round(m/6),59999),Math.round(Math.min(r,1)*50000)])};
   for(const [x,y] of d){
@@ -411,8 +417,108 @@ function drawPrev(){
   pcx.stroke();
 }
 function fitPrev(){const r=prev.getBoundingClientRect(),d=window.devicePixelRatio||1;PW=r.width;prev.width=prev.height=Math.round(PW*d);pcx.setTransform(d,0,0,d,0,0);drawPrev()}
+
+// ---- Outline (line art) conversion ----
+function blurG(g,n){
+  const o=new Float32Array(S*S);
+  for(let y=0;y<S;y++)for(let x=0;x<S;x++){
+    let a=0,c=0;
+    for(let dy=-n;dy<=n;dy++)for(let dx=-n;dx<=n;dx++){const xx=x+dx,yy=y+dy;if(xx>=0&&xx<S&&yy>=0&&yy<S){a+=g[yy*S+xx];c++}}
+    o[y*S+x]=a/c;
+  }
+  return o;
+}
+const PK=p=>p[0]*1024+p[1];
+const toNorm=p=>[(p[0]/2)/(S-1)*2-1,1-(p[1]/2)/(S-1)*2];
+function traceContours(B){
+  const segs=[];
+  for(let y=0;y<S-1;y++)for(let x=0;x<S-1;x++){
+    const code=B[y*S+x]|(B[y*S+x+1]<<1)|(B[(y+1)*S+x+1]<<2)|(B[(y+1)*S+x]<<3);
+    if(code===0||code===15)continue;
+    const T=[2*x+1,2*y],R=[2*x+2,2*y+1],Bm=[2*x+1,2*y+2],L=[2*x,2*y+1];
+    const add=(a,b)=>{
+      const na=toNorm(a),nb=toNorm(b);
+      if(Math.hypot(na[0],na[1])<=0.95&&Math.hypot(nb[0],nb[1])<=0.95)segs.push([a,b]);
+    };
+    switch(code){
+      case 1:case 14:add(L,T);break;
+      case 2:case 13:add(T,R);break;
+      case 3:case 12:add(L,R);break;
+      case 4:case 11:add(R,Bm);break;
+      case 5:add(L,T);add(R,Bm);break;
+      case 6:case 9:add(T,Bm);break;
+      case 7:case 8:add(L,Bm);break;
+      case 10:add(T,R);add(L,Bm);break;
+    }
+  }
+  const used=new Uint8Array(segs.length),adj=new Map();
+  segs.forEach((sg,i)=>{for(const p of sg){const k=PK(p);if(!adj.has(k))adj.set(k,[]);adj.get(k).push(i)}});
+  const free=pt=>{for(const j of adj.get(PK(pt))||[])if(!used[j])return j;return -1};
+  const lines=[];
+  for(let i=0;i<segs.length;i++){
+    if(used[i])continue;used[i]=1;
+    const line=[segs[i][0],segs[i][1]];
+    for(;;){const e=line[line.length-1],j=free(e);if(j<0)break;used[j]=1;const sg=segs[j];line.push(PK(sg[0])===PK(e)?sg[1]:sg[0])}
+    const front=[];
+    for(;;){const st=front.length?front[front.length-1]:line[0],j=free(st);if(j<0)break;used[j]=1;const sg=segs[j];front.push(PK(sg[0])===PK(st)?sg[1]:sg[0])}
+    lines.push(front.reverse().concat(line));
+  }
+  return lines;
+}
+function dp(pts,eps){
+  if(pts.length<3)return pts;
+  const keep=new Uint8Array(pts.length);keep[0]=keep[pts.length-1]=1;
+  const st=[[0,pts.length-1]];
+  while(st.length){
+    const [a,b]=st.pop();
+    const [ax,ay]=pts[a],[bx,by]=pts[b],dx=bx-ax,dy=by-ay,L=Math.hypot(dx,dy);
+    let md=0,mi=-1;
+    for(let i=a+1;i<b;i++){
+      const d=L>1e-9?Math.abs(dy*(pts[i][0]-ax)-dx*(pts[i][1]-ay))/L:Math.hypot(pts[i][0]-ax,pts[i][1]-ay);
+      if(d>md){md=d;mi=i}
+    }
+    if(md>eps){keep[mi]=1;st.push([a,mi],[mi,b])}
+  }
+  return pts.filter((_,i)=>keep[i]);
+}
+function buildOutline(){
+  const T=+$('detail').value,thr=+$('contrast').value/200,inv=$('inv').checked;
+  const g=blurG(G,2),B=new Uint8Array(S*S);
+  for(let i=0;i<S*S;i++){let dark=g[i]<thr;if(inv)dark=!dark;B[i]=dark?1:0}
+  const eps=0.36/T,polys=[];
+  for(const l of traceContours(B)){
+    const closed=PK(l[0])===PK(l[l.length-1]);
+    const pts=dp(l.map(toNorm),eps);
+    let per=0;for(let i=1;i<pts.length;i++)per+=Math.hypot(pts[i][0]-pts[i-1][0],pts[i][1]-pts[i-1][1]);
+    if(per>=0.07&&pts.length>=(closed?4:2))polys.push({closed,pts});
+  }
+  const dist=(a,b)=>Math.hypot(a[0]-b[0],a[1]-b[1]);
+  let cur=[0,0];const path=[],n=polys.length,rest=polys.slice();
+  while(rest.length){
+    let bi=-1,bd=1e9,bk=0,rev=false;
+    rest.forEach((pl,i)=>{
+      if(pl.closed){for(let k=0;k<pl.pts.length-1;k++){const d=dist(cur,pl.pts[k]);if(d<bd){bd=d;bi=i;bk=k;rev=false}}}
+      else{
+        const d0=dist(cur,pl.pts[0]),d1=dist(cur,pl.pts[pl.pts.length-1]);
+        if(d0<bd){bd=d0;bi=i;rev=false}
+        if(d1<bd){bd=d1;bi=i;rev=true}
+      }
+    });
+    const pl=rest.splice(bi,1)[0];let pts=pl.pts;
+    if(pl.closed){const body=pts.slice(0,-1);pts=body.slice(bk).concat(body.slice(0,bk),[body[bk]])}
+    else if(rev)pts=pts.slice().reverse();
+    for(const q of pts)path.push(q);
+    cur=pts[pts.length-1];
+  }
+  imgPts=path.length>1?polarize(path,0.015):[];
+  $('imginfo').textContent=imgPts.length
+    ?('Outline: '+n+' line'+(n===1?'':'s')+', '+imgPts.length+' points, about '+Math.ceil(imgPts.length/40*0.1)+' s to upload. Separate lines are joined by straight links, which will show in the sand.')
+    :'No outlines found. Try the Contrast slider or Invert.';
+  drawPrev();
+}
 function buildImg(){
   if(!G)return;
+  if($('style').value==='outline'){buildOutline();return}
   const T=+$('detail').value,gam=+$('contrast').value/100,inv=$('inv').checked;
   const rmax=0.97,c=rmax/(2*Math.PI*T),STEP=0.02,LAM=0.1,A=0.45*rmax/T,pts=[];
   let phi=0,sArc=0;
@@ -442,7 +548,17 @@ $('file').onchange=async e=>{
     srcCv=cv;buildImg();
   }catch(err){$('imginfo').textContent='Could not read that image: '+err.message}
 };
-['detail','contrast','inv'].forEach(i=>$(i).addEventListener('input',buildImg));
+['detail','contrast','inv','style'].forEach(i=>{$(i).addEventListener('input',buildImg);$(i).addEventListener('change',buildImg)});
+function savePattern(pts,name){
+  if(!pts||pts.length<2){$('imginfo').textContent='Nothing to save yet.';return}
+  const txt=pts.map(([t,r])=>(t*6)+','+(r*2)).join('\n')+'\n';
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([txt],{type:'text/plain'}));a.download=name+'.txt';
+  document.body.appendChild(a);a.click();a.remove();
+  log('Saved '+pts.length+' points as '+name+'.txt');
+}
+$('saveimg').onclick=()=>savePattern(imgPts,'image-pattern');
+$('savedraw').onclick=()=>savePattern(toPoints(),'drawing-pattern');
 $('sendimg').onclick=()=>{
   if(!imgPts.length){setStatus('Choose an image first.');return}
   sendPath(imgPts,'image');
