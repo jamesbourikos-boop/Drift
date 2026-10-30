@@ -68,6 +68,7 @@ input[type=color]{width:64px;height:44px;border:1px solid var(--bd);background:v
 <label>Brightness <input id="brt" type="range" min="0" max="100" value="50" disabled></label>
 <p><small>Table colors (tap to select)</small></p>
 <div class="row" id="pal"></div>
+<div class="row"><button id="restorepal" class="alt" disabled>Restore default colors</button></div>
 <div class="row">
   <input id="col" type="color" value="#ffffff" disabled>
   <button id="setcol" disabled>Set color</button>
@@ -86,19 +87,19 @@ input[type=color]{width:64px;height:44px;border:1px solid var(--bd);background:v
 </div>
 <div class="row"><button id="copy" class="alt">Copy log</button></div>
 <pre id="log"></pre>
-<p><small>Version 12. Unofficial and at your own risk. Protocol from the Drifted project docs. Tested on a 21 inch table (ST-400).</small></p>
+<p><small>Version 14. Unofficial and at your own risk. Protocol from the Drifted project docs. Tested on a 21 inch table (ST-400).</small></p>
 <script>
 const SVC='0000ffe0-0000-1000-8000-00805f9b34fb',WR='0000ffe9-0000-1000-8000-00805f9b34fb',NT='0000ffe4-0000-1000-8000-00805f9b34fb';
 const $=id=>document.getElementById(id);
 const CONFIRM=new Uint8Array([0x7b,4,0xd0,0x4f]);
-let wch=null,buf=[],ready=false,waiter=null,q=Promise.resolve(),curId=0,fatal=[],busy=false,tbl=null,synced=false;
+let wch=null,buf=[],ready=false,waiter=null,q=Promise.resolve(),curId=0,fatal=[],busy=false,tbl=null,synced=false,colorBusy=false;
 const log=m=>{const l=$('log');l.textContent+=m+'\n';l.scrollTop=l.scrollHeight};
 window.addEventListener('error',e=>log('Page error: '+e.message));
 const hex=a=>[...a].map(b=>b.toString(16).padStart(2,'0')).join(' ');
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const u16=v=>[v&255,(v>>8)&255];
 const u32=v=>[v&255,(v>>8)&255,(v>>16)&255,(v>>>24)&255];
-const CTL=['lon','loff','draw','send','sendimg','cleanonly','pp','next','spd','brt','col','setcol','shift','breath','pon','poff'];
+const CTL=['restorepal','lon','loff','draw','send','sendimg','cleanonly','pp','next','spd','brt','col','setcol','shift','breath','pon','poff'];
 function setStatus(t){$('status').textContent=t;CTL.forEach(i=>$(i).disabled=!ready||busy);document.querySelectorAll('#pal button').forEach(b=>b.disabled=!ready||busy)}
 function pkt(cmd,data){const a=[0x7b,data.length+4,cmd&0x7f,...data];let s=0;for(const b of a)s+=b;a.push(s&255);return new Uint8Array(a)}
 const ALARMS={8:'motor driver error',9:'SD card init failed',10:'cannot open pattern file',11:'cannot read pattern file',12:'cannot close pattern file',13:'cannot delete pattern file',14:'file seek failed',15:'position reset failed',16:'homing failed',17:'cannot create received file'};
@@ -117,11 +118,12 @@ function parseState(d){
   }catch(e){return null}
 }
 function onState(o){
+  if(o.brightness>100||o.status>3||o.speed>100)return;
   const keys=['powerOn','sleep','brightness','breathing','shifting','colorName','color','status'];
   if(tbl){const ch=keys.filter(k=>tbl[k]!==o[k]).map(k=>k+': '+tbl[k]+' -> '+o[k]);if(ch.length)log('State changed: '+ch.join(', '))}
   else log('State: '+keys.map(k=>k+'='+o[k]).join(', '));
   tbl=o;curId=o.patternId;
-  $('state').textContent='Table state: power '+(o.powerOn?'on':'off')+', sleep '+(o.sleep?'on':'off')+', brightness '+o.brightness+', color '+o.colorName+' '+o.color+', shifting '+(o.shifting?'on':'off')+', breathing '+(o.breathing?'on':'off')+', '+(o.status?'drawing '+Math.round(o.progress/100)+'%':'idle');
+  $('state').textContent='Table state: light '+(o.status===2?'off':'on')+' (status '+o.status+', flag '+(o.powerOn?1:0)+'), sleep '+(o.sleep?'on':'off')+', brightness '+o.brightness+', color '+o.colorName+' '+o.color+', shifting '+(o.shifting?'on':'off')+', breathing '+(o.breathing?'on':'off')+', progress '+Math.round(o.progress/100)+'%';
   if(!synced){synced=true;$('brt').value=o.brightness;$('spd').value=Math.max(0,Math.min(100,Math.round((o.speed-30)/45*100)));shiftOn=o.shifting;breathOn=o.breathing;labels()}
 }
 function runState(d){let i=1;const str=()=>{while(i<d.length&&d[i]!==0)i++;i++};i++;str();i+=3;i++;str();return d[i]|(d[i+1]<<8)}
@@ -139,13 +141,18 @@ function onData(ev){
     if(len<4||len>=200){buf.shift();continue}
     if(buf.length<len)break;
     let sum=0;for(let i=0;i<len-1;i++)sum+=buf[i];
-    if((sum&255)!==buf[len-1]){if(len>10)log('Dropped corrupt packet: '+hex(buf.slice(0,12))+' ...');buf.shift();continue}
+    if((sum&255)!==buf[len-1]){
+      if((buf[2]&0x7f)===0x35){
+        let k=-1;
+        for(let j=3;j<Math.min(len,buf.length-2);j++){if(buf[j]===0x7b&&buf[j+1]===buf[1]&&(buf[j+2]&0x7f)===0x35){k=j;break}}
+        if(k>0){handle(buf.splice(0,k));continue}
+      }
+      if(len>10)log('Dropped corrupt packet: '+hex(buf.slice(0,12))+' ...');buf.shift();continue
+    }
     handle(buf.splice(0,len));
   }
 }
 function handle(p){
-  let s=0;for(let i=0;i<p.length-1;i++)s+=p[i];
-  if((s&255)!==p[p.length-1]){log('Bad checksum: '+hex(p));return}
   const ackCmd=p[2],cmd=ackCmd&0x7f,ack=!!(ackCmd&0x80),data=p.slice(3,p.length-1),action=data[0];
   const msg={cmd,ack,action,data};
   if(cmd===0x50&&ack){/* table's own confirm: do not answer */}
@@ -251,13 +258,14 @@ $('brt').onchange=async e=>{await setPower(true);lightTo(+e.target.value)};
 $('shift').onclick=async()=>{shiftOn=!shiftOn;labels();await setPower(true);light()};
 $('breath').onclick=async()=>{breathOn=!breathOn;labels();await setPower(true);light()};
 // The power command (0x14/16) is a toggle on this table, so only send it when the state needs to change.
+const lightIsOn=()=>tbl&&tbl.status!==2;
 async function setPower(want){
   if(!tbl){log('No table state yet, try again in a moment');return}
-  if(tbl.powerOn===want)return;
+  if(lightIsOn()===want)return;
   await send(pkt(0x14,[16,want?1:0]));
   const t0=Date.now();
-  while(tbl.powerOn!==want&&Date.now()-t0<2500)await sleep(100);
-  if(tbl.powerOn!==want)log('Power did not change to '+(want?'on':'off'));
+  while(lightIsOn()!==want&&Date.now()-t0<3000)await sleep(100);
+  if(lightIsOn()!==want)log('Power did not change to '+(want?'on':'off')+' (status '+tbl.status+')');
 }
 // Send a command and wait for the table to acknowledge it before the next one.
 async function cmd(p,pause){
@@ -290,26 +298,49 @@ function renderPalette(){
   for(const c of palette){
     const b=document.createElement('button');
     const l=parseInt(c.hex.slice(1,3),16)*.299+parseInt(c.hex.slice(3,5),16)*.587+parseInt(c.hex.slice(5,7),16)*.114;
-    b.textContent=c.name;b.style.background=c.hex;b.style.color=l>140?'#000':'#fff';b.style.borderColor=c.hex;
+    b.textContent=palette.filter(x=>x.name===c.name).length>1?c.name+' '+c.hex:c.name;b.style.background=c.hex;b.style.color=l>140?'#000':'#fff';b.style.borderColor=c.hex;
     b.disabled=!ready||busy;b.onclick=()=>pickPalette(c.name);box.appendChild(b);
   }
 }
 async function pickPalette(name){
-  await setPower(true);
-  shiftOn=false;breathOn=false;labels();
-  log('Selecting table color '+name);
-  await cmd(pkt(0x14,[13,...new TextEncoder().encode(name),0]),300);
-  await cmd(pkt(0x11,[4,0,0,0,0,bright()||70]));
+  if(colorBusy)return;colorBusy=true;
+  try{
+    await setPower(true);
+    shiftOn=false;breathOn=false;labels();
+    log('Selecting table color '+name);
+    await cmd(pkt(0x14,[13,...new TextEncoder().encode(name),0]),300);
+    await cmd(pkt(0x11,[4,0,0,0,0,bright()||70]));
+  }finally{colorBusy=false}
+}
+const DEFAULT_PALETTE=[['writ',255,255,255],['red',255,0,0],['gree',0,255,0],['blue',0,0,255],['oran',255,127,0]];
+async function restorePalette(){
+  if(colorBusy)return;
+  if(!confirm('Replace the table color list with white, red, green, blue and orange?'))return;
+  colorBusy=true;
+  try{
+    const enc=new TextEncoder(),n=DEFAULT_PALETTE.length,body=[];
+    for(const [nm,r,g,b] of DEFAULT_PALETTE)body.push(...enc.encode(nm),0,r,g,b);
+    log('Rewriting the color list');
+    await cmd(pkt(0x11,[1,n]),300);
+    await cmd(pkt(0x11,[3,1,n,...body]),300);
+    await cmd(pkt(0x11,[2,n]),500);
+    await send(pkt(0x11,[5]));
+  }finally{colorBusy=false}
 }
 $('setcol').onclick=async()=>{
-  const h=$('col').value,r=parseInt(h.slice(1,3),16),g=parseInt(h.slice(3,5),16),b=parseInt(h.slice(5,7),16);
-  await setPower(true);
-  shiftOn=false;breathOn=false;labels();
-  log('Setting custom color '+h);
-  await cmd(pkt(0x14,[15,1,r,g,b]),500);
-  await cmd(pkt(0x14,[13,...new TextEncoder().encode('Temp'),0]),500);
-  await cmd(pkt(0x11,[4,0,0,0,0,bright()||70]));
+  if(colorBusy)return;colorBusy=true;
+  try{
+    const h=$('col').value,r=parseInt(h.slice(1,3),16),g=parseInt(h.slice(3,5),16),b=parseInt(h.slice(5,7),16);
+    await setPower(true);
+    shiftOn=false;breathOn=false;labels();
+    log('Setting custom color '+h);
+    await cmd(pkt(0x14,[15,1,r,g,b]),500);
+    await cmd(pkt(0x14,[13,...new TextEncoder().encode('Temp'),0]),500);
+    await cmd(pkt(0x11,[4,0,0,0,0,bright()||70]),600);
+    await send(pkt(0x11,[5]));
+  }finally{colorBusy=false}
 };
+$('restorepal').onclick=restorePalette;
 const pad=$('pad'),cx=pad.getContext('2d');
 let strokes=[],cur=null,W=0;
 const css=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
