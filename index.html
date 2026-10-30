@@ -47,7 +47,7 @@ input[type=color]{width:64px;height:44px;border:1px solid var(--bd);background:v
   <button id="loff" class="alt" disabled>Light off</button>
 </div>
 <div class="row">
-  <button id="ptog" class="alt" disabled>Toggle power (sends once)</button>
+  <button id="ptog" class="alt" disabled>Sleep / wake (power toggle)</button>
 </div>
 <label>Brightness <input id="brt" type="range" min="0" max="100" value="50" disabled></label>
 <p><small>Table colors (tap to select)</small></p>
@@ -88,12 +88,12 @@ input[type=color]{width:64px;height:44px;border:1px solid var(--bd);background:v
 <canvas id="prev"></canvas>
 <p id="imginfo">Pick a bold, high-contrast picture such as a face or a logo. Darker areas get stronger waves in the sand.</p>
 <div class="row"><button id="sendimg" disabled>Send image</button></div>
-<p><small>Version 16. Unofficial and at your own risk. Protocol from the Drifted project docs. Tested on a 21 inch table (ST-400).</small></p>
+<p><small>Version 17. Unofficial and at your own risk. Protocol from the Drifted project docs. Tested on a 21 inch table (ST-400).</small></p>
 <script>
 const SVC='0000ffe0-0000-1000-8000-00805f9b34fb',WR='0000ffe9-0000-1000-8000-00805f9b34fb',NT='0000ffe4-0000-1000-8000-00805f9b34fb';
 const $=id=>document.getElementById(id);
 const CONFIRM=new Uint8Array([0x7b,4,0xd0,0x4f]);
-let wch=null,buf=[],ready=false,waiter=null,q=Promise.resolve(),curId=0,fatal=[],busy=false,tbl=null,synced=false,colorBusy=false;
+let wch=null,buf=[],ready=false,waiter=null,q=Promise.resolve(),curId=0,fatal=[],busy=false,tbl=null,synced=false,colorBusy=false,rawPrev=null;
 const log=m=>{const l=$('log');l.textContent+=m+'\n';l.scrollTop=l.scrollHeight};
 window.addEventListener('error',e=>log('Page error: '+e.message));
 const hex=a=>[...a].map(b=>b.toString(16).padStart(2,'0')).join(' ');
@@ -112,14 +112,23 @@ function parseState(d){
   try{
     const o={};
     o.brightness=u8();o.colorName=str();o.color='#'+[u8(),u8(),u8()].map(v=>v.toString(16).padStart(2,'0')).join('');
-    o.speed=u8();o.playlist=str();o.patternId=u16();o.progress=u16();o.status=u8();
+    o.speed=u8();o.playlist=str();o.patternId=u16();o.progAt=i;o.progress=u16();o.status=u8();
     o.random=!!u8();o.loop=!!u8();o.sleep=!!u8();o.breathing=!!u8();o.shifting=!!u8();o.shiftTime=u16();
-    o.ctrl=str();u8();u8();o.driver=str();u8();u8();o.powerOn=!!u8();
+    o.ctrl=str();u8();u8();o.driver=str();u8();u8();o.powerOn=!!u8();o.endAt=i;
     return o;
   }catch(e){return null}
 }
-function onState(o){
+function onState(o,d){
   if(o.brightness>100||o.status>3||o.speed>100)return;
+  if(d){
+    if(!rawPrev)log('State bytes after the power flag: '+(hex(d.slice(o.endAt))||'(none)'));
+    else if(rawPrev.length===d.length){
+      const ch=[];
+      for(let i=0;i<d.length;i++)if(d[i]!==rawPrev[i]&&i!==o.progAt&&i!==o.progAt+1)ch.push(i+': '+rawPrev[i].toString(16)+'->'+d[i].toString(16));
+      if(ch.length)log('Raw state bytes changed (index: old->new): '+ch.join(', '));
+    }
+    rawPrev=d.slice();
+  }
   const keys=['powerOn','sleep','brightness','breathing','shifting','colorName','color','status'];
   if(tbl){const ch=keys.filter(k=>tbl[k]!==o[k]).map(k=>k+': '+tbl[k]+' -> '+o[k]);if(ch.length)log('State changed: '+ch.join(', '))}
   else log('State: '+keys.map(k=>k+'='+o[k]).join(', '));
@@ -160,7 +169,7 @@ function handle(p){
   else if(cmd===0x50&&action===1){send(pkt(0x50,[2,1]))}
   else if(cmd===0x32&&action===2&&!ack){send(timePkt())}
   else{send(CONFIRM);if(cmd===0x4f&&action===1){ready=true;setStatus('Ready. Session established.')}}
-  if(cmd===0x35&&action===1){const o=parseState(data);if(o)onState(o)}
+  if(cmd===0x35&&action===1){const o=parseState(data);if(o)onState(o,data)}
   if(cmd===0x31&&action===3&&!ack)parsePalette(data);
   if(cmd===0x37&&action===1){const n=data[1],codes=[];for(let j=0;j<n;j++)codes.push(data[2+2*j]|(data[3+2*j]<<8));if(codes.join()!==fatal.join()){fatal=codes;log('FATAL ALARM codes: '+codes.join(', '));showWarn()}}
   if(cmd!==0x35&&cmd!==0x37&&!(cmd===0x50&&ack))log('< '+hex(p));
@@ -172,7 +181,7 @@ async function connect(all){
     const opts=all?{acceptAllDevices:true,optionalServices:[SVC]}:{filters:[{namePrefix:'KS'}],optionalServices:[SVC]};
     const dev=await navigator.bluetooth.requestDevice(opts);
     dev.addEventListener('gattserverdisconnected',()=>{ready=false;setStatus('Disconnected');log('Disconnected')});
-    fatal=[];tbl=null;synced=false;showWarn();setStatus('Connecting...');
+    fatal=[];tbl=null;synced=false;rawPrev=null;showWarn();setStatus('Connecting...');
     const s=await(await dev.gatt.connect()).getPrimaryService(SVC);
     wch=await s.getCharacteristic(WR);
     const n=await s.getCharacteristic(NT);
