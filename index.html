@@ -36,6 +36,7 @@ input[type=color]{width:64px;height:44px;border:1px solid var(--bd);background:v
 <p>Step 2: connect, handshake, and draw a test spiral. Close the HoMedics app first. Works in Chrome on Android.</p>
 <div id="status">Not connected</div>
 <div id="warn" hidden></div>
+<p id="state"><small>Table state: waiting for the table...</small></p>
 <div class="row">
   <button id="c1">Connect</button>
   <button id="c2" class="alt">Show all devices</button>
@@ -74,6 +75,10 @@ input[type=color]{width:64px;height:44px;border:1px solid var(--bd);background:v
   <button id="breath" class="alt" disabled>Breathing: off</button>
 </div>
 <div class="row">
+  <button id="lon" class="alt" disabled>Light on</button>
+  <button id="loff" class="alt" disabled>Light off</button>
+</div>
+<div class="row">
   <button id="pon" class="alt" disabled>Power on</button>
   <button id="poff" class="alt" disabled>Power off</button>
 </div>
@@ -84,18 +89,39 @@ input[type=color]{width:64px;height:44px;border:1px solid var(--bd);background:v
 const SVC='0000ffe0-0000-1000-8000-00805f9b34fb',WR='0000ffe9-0000-1000-8000-00805f9b34fb',NT='0000ffe4-0000-1000-8000-00805f9b34fb';
 const $=id=>document.getElementById(id);
 const CONFIRM=new Uint8Array([0x7b,4,0xd0,0x4f]);
-let wch=null,buf=[],ready=false,waiter=null,q=Promise.resolve(),curId=0,fatal=[],busy=false;
+let wch=null,buf=[],ready=false,waiter=null,q=Promise.resolve(),curId=0,fatal=[],busy=false,tbl=null,synced=false;
 const log=m=>{const l=$('log');l.textContent+=m+'\n';l.scrollTop=l.scrollHeight};
 window.addEventListener('error',e=>log('Page error: '+e.message));
 const hex=a=>[...a].map(b=>b.toString(16).padStart(2,'0')).join(' ');
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const u16=v=>[v&255,(v>>8)&255];
 const u32=v=>[v&255,(v>>8)&255,(v>>16)&255,(v>>>24)&255];
-const CTL=['draw','send','sendimg','cleanonly','pp','next','spd','brt','col','setcol','shift','breath','pon','poff'];
+const CTL=['lon','loff','draw','send','sendimg','cleanonly','pp','next','spd','brt','col','setcol','shift','breath','pon','poff'];
 function setStatus(t){$('status').textContent=t;CTL.forEach(i=>$(i).disabled=!ready||busy)}
 function pkt(cmd,data){const a=[0x7b,data.length+4,cmd&0x7f,...data];let s=0;for(const b of a)s+=b;a.push(s&255);return new Uint8Array(a)}
 const ALARMS={8:'motor driver error',9:'SD card init failed',10:'cannot open pattern file',11:'cannot read pattern file',12:'cannot close pattern file',13:'cannot delete pattern file',14:'file seek failed',15:'position reset failed',16:'homing failed',17:'cannot create received file'};
 function showWarn(){const w=$('warn');if(!fatal.length){w.hidden=true;return}w.hidden=false;w.textContent='The table reports a fatal alarm: '+fatal.map(c=>c+' ('+(ALARMS[c]||'unknown')+')').join(', ')+'. It stays until the table is restarted. Turn the table off and on, then reconnect.'}
+function parseState(d){
+  let i=1;
+  const u8=()=>{if(i>=d.length)throw 0;return d[i++]},u16=()=>{const v=u8();return v|(u8()<<8)};
+  const str=()=>{let t='';while(i<d.length&&d[i]!==0)t+=String.fromCharCode(d[i++]);i++;return t};
+  try{
+    const o={};
+    o.brightness=u8();o.colorName=str();o.color='#'+[u8(),u8(),u8()].map(v=>v.toString(16).padStart(2,'0')).join('');
+    o.speed=u8();o.playlist=str();o.patternId=u16();o.progress=u16();o.status=u8();
+    o.random=!!u8();o.loop=!!u8();o.sleep=!!u8();o.breathing=!!u8();o.shifting=!!u8();o.shiftTime=u16();
+    o.ctrl=str();u8();u8();o.driver=str();u8();u8();o.powerOn=!!u8();
+    return o;
+  }catch(e){return null}
+}
+function onState(o){
+  const keys=['powerOn','sleep','brightness','breathing','shifting','colorName','color','status'];
+  if(tbl){const ch=keys.filter(k=>tbl[k]!==o[k]).map(k=>k+': '+tbl[k]+' -> '+o[k]);if(ch.length)log('State changed: '+ch.join(', '))}
+  else log('State: '+keys.map(k=>k+'='+o[k]).join(', '));
+  tbl=o;curId=o.patternId;
+  $('state').textContent='Table state: power '+(o.powerOn?'on':'off')+', sleep '+(o.sleep?'on':'off')+', brightness '+o.brightness+', color '+o.colorName+' '+o.color+', shifting '+(o.shifting?'on':'off')+', breathing '+(o.breathing?'on':'off')+', '+(o.status?'drawing '+Math.round(o.progress/100)+'%':'idle');
+  if(!synced){synced=true;$('brt').value=o.brightness;$('spd').value=Math.max(0,Math.min(100,Math.round((o.speed-30)/45*100)));shiftOn=o.shifting;breathOn=o.breathing;labels()}
+}
 function runState(d){let i=1;const str=()=>{while(i<d.length&&d[i]!==0)i++;i++};i++;str();i+=3;i++;str();return d[i]|(d[i+1]<<8)}
 function send(p){if(p.length<40&&p!==CONFIRM)log('> '+hex(p));q=q.then(()=>wch.writeValueWithoutResponse(p)).catch(e=>log('Write error: '+e.message));return q}
 function timePkt(){const d=new Date();return pkt(0x12,[2,d.getFullYear()%100,d.getMonth(),d.getDate(),d.getHours(),d.getMinutes(),d.getSeconds(),d.getDay()||7])}
@@ -122,7 +148,7 @@ function handle(p){
   else if(cmd===0x50&&action===1){send(pkt(0x50,[2,1]))}
   else if(cmd===0x32&&action===2&&!ack){send(timePkt())}
   else{send(CONFIRM);if(cmd===0x4f&&action===1){ready=true;setStatus('Ready. Session established.')}}
-  if(cmd===0x35&&action===1){try{curId=runState(data)}catch(e){}}
+  if(cmd===0x35&&action===1){const o=parseState(data);if(o)onState(o)}
   if(cmd===0x37&&action===1){const n=data[1],codes=[];for(let j=0;j<n;j++)codes.push(data[2+2*j]|(data[3+2*j]<<8));if(codes.join()!==fatal.join()){fatal=codes;log('FATAL ALARM codes: '+codes.join(', '));showWarn()}}
   if(cmd!==0x35&&cmd!==0x37&&!(cmd===0x50&&ack))log('< '+hex(p));
   if(waiter&&waiter.test(msg)){const w=waiter;waiter=null;w.res(msg)}
@@ -133,7 +159,7 @@ async function connect(all){
     const opts=all?{acceptAllDevices:true,optionalServices:[SVC]}:{filters:[{namePrefix:'KS'}],optionalServices:[SVC]};
     const dev=await navigator.bluetooth.requestDevice(opts);
     dev.addEventListener('gattserverdisconnected',()=>{ready=false;setStatus('Disconnected');log('Disconnected')});
-    fatal=[];showWarn();setStatus('Connecting...');
+    fatal=[];tbl=null;synced=false;showWarn();setStatus('Connecting...');
     const s=await(await dev.gatt.connect()).getPrimaryService(SVC);
     wch=await s.getCharacteristic(WR);
     const n=await s.getCharacteristic(NT);
@@ -219,6 +245,14 @@ $('spd').onchange=e=>send(pkt(0x14,[6,Math.round(30+e.target.value/100*45)]));
 $('brt').onchange=e=>send(pkt(0x14,[7,+e.target.value]));
 $('shift').onclick=()=>{shiftOn=!shiftOn;labels();light()};
 $('breath').onclick=()=>{breathOn=!breathOn;labels();light()};
+function lightTo(b){
+  const sh=tbl?tbl.shifting:shiftOn,br=tbl?tbl.breathing:breathOn,t=tbl&&tbl.shiftTime?tbl.shiftTime:10;
+  $('brt').value=b;
+  send(pkt(0x14,[7,b]));
+  send(pkt(0x11,[4,+sh,...u16(t),+br,b]));
+}
+$('lon').onclick=()=>lightTo(tbl&&tbl.brightness>0?tbl.brightness:70);
+$('loff').onclick=()=>lightTo(0);
 $('pon').onclick=()=>send(pkt(0x14,[16,1]));
 $('poff').onclick=()=>send(pkt(0x14,[16,0]));
 $('setcol').onclick=async()=>{
