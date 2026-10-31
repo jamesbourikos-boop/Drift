@@ -20,7 +20,7 @@ button:focus-visible{outline:3px solid var(--fg);outline-offset:2px}
 #status{padding:10px 12px;background:var(--panel);border-left:4px solid var(--acc);margin:12px 0}
 pre{background:var(--panel);border:1px solid var(--bd);padding:10px;height:180px;overflow:auto;font-size:.8rem;white-space:pre-wrap;margin:0}
 small{color:var(--mut)}
-button.pt{padding:3px;min-height:0;width:64px;height:64px;background:var(--panel);border:2px solid var(--bd);border-radius:10px}
+button.pt{padding:3px;min-height:0;width:74px;display:flex;flex-direction:column;align-items:center;gap:2px;font-size:10px;line-height:1.1;background:var(--panel);color:var(--fg);border:2px solid var(--bd);border-radius:10px}
 button.pt.sel{border-color:var(--acc)}
 select{font:inherit;padding:8px;margin-left:8px;border:1px solid var(--bd);background:var(--panel);color:var(--fg);border-radius:6px}
 input[type=file]{width:100%;margin:6px 0 10px}
@@ -88,6 +88,7 @@ input[type=color]{width:64px;height:44px;border:1px solid var(--bd);background:v
   <button id="savedraw" class="alt">Save .txt</button>
 </div>
 <label><input type="checkbox" id="clean" checked> Clean the sand first</label>
+<label>Start pattern at <select id="startat"><option value="auto">Auto</option><option value="out">Outside</option><option value="in">Center</option></select></label>
 <div class="row"><button id="cleanonly" class="alt" disabled>Clean only</button></div>
 <p id="info">Draw inside the circle. Lifting your finger and starting again joins the strokes with a straight line.</p>
 <h2>Image to sand</h2>
@@ -99,7 +100,7 @@ input[type=color]{width:64px;height:44px;border:1px solid var(--bd);background:v
 <canvas id="prev"></canvas>
 <p id="imginfo">Pick a bold, high-contrast picture such as a face or a logo. Darker areas get stronger waves in the sand.</p>
 <div class="row"><button id="sendimg" disabled>Send image</button><button id="saveimg" class="alt">Save as pattern file (.txt)</button></div>
-<p><small>Version 19. Unofficial and at your own risk. Protocol from the Drifted project docs. Tested on a 21 inch table (ST-400).</small></p>
+<p><small>Version 23. Unofficial and at your own risk. Protocol from the Drifted project docs. Tested on a 21 inch table (ST-400).</small></p>
 <script>
 const SVC='0000ffe0-0000-1000-8000-00805f9b34fb',WR='0000ffe9-0000-1000-8000-00805f9b34fb',NT='0000ffe4-0000-1000-8000-00805f9b34fb';
 const $=id=>document.getElementById(id);
@@ -218,7 +219,7 @@ async function upload(id,pts){
   let pending=[...Array(pages).keys()],extra=1;
   for(let round=0;round<8;round++){
     log('Upload round '+(round+1)+': sending '+pending.length+' page(s)');
-    for(const i of pending){await send(page(i));await sleep(100)}
+    for(const i of pending){await send(page(i));await sleep(100);if(i%10===0)$('status').textContent='Uploading... '+Math.round(100*(i+1)/pages)+'%'}
     await sleep(100);
     const w=waitFor(m=>m.cmd===0x34&&[1,3,5,6].includes(m.action),15000);
     await send(pkt(0x13,[2,...u16(id),...u32(pages)]));
@@ -240,15 +241,29 @@ $('c1').onclick=()=>connect(false);
 $('c2').onclick=()=>connect(true);
 $('pp').onclick=()=>send(pkt(0x14,[3]));
 $('next').onclick=()=>send(pkt(0x14,[4]));
-const CLEAN_TURNS=30,CLEAN_STEP=8,MAXTOTAL=12000;
+const CLEAN_TURNS=30,CLEAN_STEP=8,MAXTOTAL=30000;
 const wire=(t,r)=>[Math.min(Math.round((((t%360)+360)%360)*1000/6),59999),Math.round(Math.min(r,1)*50000)];
-function cleanPts(toRim){
+function cleanPts(toRim,endTh){
   const n=Math.round(CLEAN_TURNS*360/CLEAN_STEP),c=[];
-  for(let i=0;i<=n;i++){const f=i/n;c.push(wire(f*CLEAN_TURNS*360,(toRim?f:1-f)*0.98))}
+  for(let i=0;i<=n;i++){const f=i/n;c.push(wire((endTh||0)+f*CLEAN_TURNS*360,(toRim?f:1-f)*0.98))}
   return c;
 }
-function withClean(pts){
-  const rho0=pts[0][1]/50000,th0=pts[0][0]*6/1000,c=cleanPts(rho0>0.5),last=c[c.length-1];
+// Re-order a path so it starts on the outside (or at the center): rotate closed shapes, reverse open ones.
+function orient(pts,mode){
+  if(pts.length<3)return pts;
+  const xy=q=>{const th=q[0]*6/1000*Math.PI/180,r=q[1]/50000;return [r*Math.cos(th),r*Math.sin(th)]};
+  const a=xy(pts[0]),b=xy(pts[pts.length-1]);
+  if(Math.hypot(a[0]-b[0],a[1]-b[1])<0.03){
+    const body=pts.slice(0,-1);let k=0;
+    body.forEach((q,i)=>{if(mode==='out'?q[1]>body[k][1]:q[1]<body[k][1])k=i});
+    return body.slice(k).concat(body.slice(0,k),[body[k]]);
+  }
+  return ((pts[0][1]>pts[pts.length-1][1])===(mode==='in'))?pts.slice().reverse():pts;
+}
+function withClean(pts,mode){
+  const rho0=pts[0][1]/50000,th0=pts[0][0]*6/1000;
+  const toRim=mode==='out'?true:mode==='in'?false:rho0>0.5;
+  const c=cleanPts(toRim,th0),last=c[c.length-1];
   const tha=last[0]*6/1000,rha=last[1]/50000,delta=(((th0-tha)%360)+540)%360-180;
   const n=Math.max(1,Math.ceil(Math.abs(delta)/15),Math.ceil(Math.abs(rho0-rha)/0.05)),link=[];
   for(let k=1;k<n;k++)link.push(wire(tha+delta*k/n,rha+(rho0-rha)*k/n));
@@ -256,7 +271,9 @@ function withClean(pts){
 }
 async function sendPath(pts,name,noClean){
   if(fatal.length){showWarn();setStatus('Restart the table first (see the warning).');return}
-  if(!noClean&&$('clean').checked){pts=withClean(pts);name='clean + '+name}
+  const mode=$('startat').value;
+  if(!noClean&&mode!=='auto')pts=orient(pts,mode);
+  if(!noClean&&$('clean').checked){pts=withClean(pts,mode);name='clean + '+name}
   if(pts.length>MAXTOTAL){setStatus('Path is too long ('+pts.length+' points). Simplify the drawing.');return}
   const id=curId===50000?50001:50000;log('Table is drawing '+curId+'; uploading '+name+' to '+id);
   busy=true;setStatus('Uploading '+name+' to slot '+id+'...');
@@ -268,7 +285,7 @@ async function sendPath(pts,name,noClean){
   }catch(e){busy=false;setStatus('Upload failed: '+e.message);log('Error: '+e.message)}
 }
 $('draw').onclick=()=>sendPath(spiral(),'spiral');
-$('cleanonly').onclick=()=>sendPath(cleanPts(false),'clean',true);
+$('cleanonly').onclick=()=>sendPath(cleanPts($('startat').value==='out'),'clean',true);
 
 let shiftOn=false,breathOn=false;
 const bright=()=>+$('brt').value;
@@ -395,7 +412,7 @@ function polarize(sm,step){
   }
   return pts;
 }
-const MAXPTS=8000;
+const MAXPTS=12000;
 function info(){
   const n=toPoints().length;
   $('info').textContent=n?(n+' points, about '+Math.ceil(n/40*0.1)+' s to upload.'+(n>MAXPTS?' Too long: clear or simplify the drawing.':'')):'Draw inside the circle. Lifting your finger and starting again joins the strokes with a straight line.';
@@ -588,6 +605,134 @@ const P=[
  {n:'Square spiral',f:v=>{const m=3+2*v,d=.66/m,D=[[1,0],[0,1],[-1,0],[0,-1]];let x=0,y=0;const o=[[0,0]];for(let n=1;n<=4*m;n++){const L=Math.ceil(n/2)*d,[dx,dy]=D[(n-1)%4];x+=dx*L;y+=dy*L;o.push([x,y])}return fitTo(o,.95)}},
  {n:'Heart',f:v=>{const N=800,o=[];for(let i=0;i<=N;i++){const t=i/N*TAU;o.push([16*Math.pow(Math.sin(t),3),13*Math.cos(t)-5*Math.cos(2*t)-2*Math.cos(3*t)-Math.cos(4*t)])}return fitTo(o,.92)}}
 ];
+
+// ---- Scenery, Christmas and autumn patterns ----
+const hsh=n=>{const x=Math.sin(n*127.1+311.7)*43758.5453;return x-Math.floor(x)};
+const tri=u=>{const t=(((u/Math.PI)%1)+1)%1;return 1-Math.abs(2*t-1)};
+const soft=(d,w)=>Math.max(0,Math.min(1,.5-d/(w||.02)));
+const circ=(x,y,cx,cy,r)=>soft(Math.hypot(x-cx,y-cy)-r);
+const segd=(x,y,ax,ay,bx,by)=>{const dx=bx-ax,dy=by-ay,t=Math.max(0,Math.min(1,((x-ax)*dx+(y-ay)*dy)/(dx*dx+dy*dy)));return Math.hypot(x-ax-t*dx,y-ay-t*dy)};
+const specks=(x,y,n,seed,rad)=>{const gx=Math.floor((x+1)*n),gy=Math.floor((y+1)*n);return hsh(gx*53+gy*29+seed)>.86&&Math.hypot(x-(gx/n-1+.5/n),y-(gy/n-1+.5/n))<rad};
+// Horizontal back-and-forth lines whose wave height follows how dark the scene is.
+function scene(dark,v){
+  const s0=[.09,.07,.055,.043,.033][v-1],R=.93,n=Math.round(2*R/s0),s=2*R/n,A=.85*s,lam=1.5*s,ds=Math.min(.012,lam/5),o=[];
+  for(let k=0;k<n;k++){
+    const y0=R-(k+.5)*s,w=Math.sqrt(Math.max(0,R*R-y0*y0)),m=Math.max(2,Math.ceil(2*w/ds)),dir=k%2?-1:1;
+    for(let i=0;i<=m;i++){const x=dir*(-w+2*w*i/m);{let yy=y0+A*dark(x,y0)*Math.asin(Math.sin(TAU*x/lam))*2/Math.PI,rr=Math.hypot(x,yy),xx=x;if(rr>.96){xx=x*.96/rr;yy=yy*.96/rr}o.push([xx,yy])}}
+  }
+  return o;
+}
+const pine=(x,y,cx,b,h,w)=>{if(y<b-.05||y>b+h)return 0;if(y<b)return Math.abs(x-cx)<w*.1?1:0;const t=(y-b)/h;return Math.abs(x-cx)<w*(1-t)*(.7+.3*((t*4)%1))?1:0};
+function darkMountains(x,y){
+  const hb=.18+.26*tri(x*1.2+.5)+.07*tri(x*3.3+1),hm=-.12+.34*tri(x*1.5+1.9)+.08*tri(x*4+.3),hn=-.52+.26*tri(x*1.05+2.6)+.06*tri(x*5.2);
+  let d=.12;
+  d*=1-circ(x,y,.5,.64,.13);
+  d*=1-Math.max(circ(x,y,-.5,.62,.08)*.9,circ(x,y,-.38,.58,.06));
+  if(y<hb){d=.35;if(y>hb-.075&&hb>.3)d=0}
+  if(y<hm){d=.7;if(y>hm-.07&&hm>.14)d=0}
+  if(y<hn)d=1;
+  return d;
+}
+function darkPines(x,y){
+  let d=.05;
+  d*=1-circ(x,y,.55,.7,.12);
+  if(y<-.78+.05*Math.sin(x*3))return .3;
+  const rows=[[.5,-.1,.5,.13,.45],[.8,-.4,.6,.17,.85],[1,-.72,.8,.22,1]];
+  for(const [sh,b,hh,w,sp] of rows){
+    for(let i=0;i<9;i++){const cx=-1+i*.25+hsh(i*7+sh*10)*.1,base=b-hsh(i*3+sh*5)*.12,h=hh*(.7+.5*hsh(i*11+sh*3));
+      if(pine(x,y,cx,base,h,w))d=Math.max(d,sh)}
+  }
+  return d;
+}
+function darkNight(x,y){
+  let d=.55;
+  if(specks(x,y,9,3,.022))d=0;
+  d*=1-circ(x,y,-.4,.5,.2)*(1-circ(x,y,-.31,.56,.17));
+  const h1=-.2+.18*Math.sin(x*2.2+.6)+.05*Math.sin(x*6);
+  if(y<h1)d=.95;
+  for(let i=0;i<7;i++){const cx=-.9+i*.3+hsh(i)*.1,b=-.2+.16*Math.sin(cx*2.2+.6)-.02;if(pine(x,y,cx,b,.3+.2*hsh(i+4),.1))d=1}
+  return d;
+}
+function darkTree(x,y){
+  let d=.35;
+  if(specks(x,y,12,5,.02))d=0;
+  if(y<-.72+.04*Math.sin(x*4))d=0;
+  let tree=0;
+  for(const [b,h,w] of [[-.5,.5,.5],[-.22,.46,.42],[.04,.42,.34],[.28,.38,.26]])if(y>=b&&y<=b+h&&Math.abs(x)<w*(1-(y-b)/h)+.02)tree=1;
+  if(y>=-.74&&y<-.48&&Math.abs(x)<.07)tree=1;
+  if(tree){d=1;for(const [ox,oy] of [[-.22,-.34],[.25,-.28],[0,-.12],[-.16,.06],[.18,.1],[0,.32],[-.07,.5]])if(Math.hypot(x-ox,y-oy)<.05)d=0}
+  const a=Math.atan2(y-.76,x),r=Math.hypot(x,y-.76);
+  if(r<.13*(.45+.55*Math.abs(Math.cos(2.5*a))))d=0;
+  return d;
+}
+function darkSnowman(x,y){
+  let d=.6;
+  if(specks(x,y,12,9,.02))d=0;
+  if(y<-.65+.05*Math.sin(2.5*x))d=0;
+  let body=0;for(const [cx,cy,r] of [[0,-.35,.38],[0,.12,.28],[0,.5,.2]])body=Math.max(body,circ(x,y,cx,cy,r));
+  d*=1-body;
+  if((y>.62&&y<.9&&Math.abs(x)<.14)||(y>.57&&y<.64&&Math.abs(x)<.26))d=1;
+  for(const [cx,cy,r] of [[-.07,.55,.03],[.07,.55,.03],[0,.2,.03],[0,.06,.03],[0,-.1,.035],[0,-.3,.04],[0,-.48,.04]])if(Math.hypot(x-cx,y-cy)<r)d=1;
+  if(x>0&&x<.2&&Math.abs(y-.5)<.014+.02*(1-x/.2))d=.9;
+  if(y>.3&&y<.36&&Math.abs(x)<.27)d=.85;
+  if(segd(x,y,.27,.1,.65,.32)<.02||segd(x,y,-.27,.1,-.65,.32)<.02)d=1;
+  return d;
+}
+function darkAutumn(x,y){
+  let d=.08;
+  if(y<-.62+.05*Math.sin(x*3+1))d=.35;
+  if(y>-.7&&y<.1&&Math.abs(x)<.07+.06*Math.max(0,-.3-y))d=1;
+  if(segd(x,y,0,0,-.32,.28)<.03||segd(x,y,0,0,.32,.28)<.03)d=1;
+  let can=0;
+  for(const [cx,cy,r] of [[0,.42,.42],[-.4,.3,.3],[.4,.3,.3],[-.22,.64,.26],[.22,.64,.26]])can=Math.max(can,circ(x,y,cx,cy,r));
+  if(can>0){
+    d=Math.max(d,.5*can);
+    const gx=Math.floor((x+1)*14),gy=Math.floor((y+1)*14),h=hsh(gx*41+gy*7),c=Math.hypot(x-(gx/14-1+1/28),y-(gy/14-1+1/28));
+    if(can>.5&&c<.03){if(h>.55)d=1;else if(h<.2)d=.1}
+  }
+  for(const [lx,ly] of [[-.75,-.1],[.7,.05],[-.55,-.4],[.55,-.45],[.15,-.55],[-.2,-.2]])if(Math.hypot(x-lx,y-ly)<.04)d=1;
+  return d;
+}
+P.push(
+ {n:'Mountains',f:v=>scene(darkMountains,v)},
+ {n:'Pine forest',f:v=>scene(darkPines,v)},
+ {n:'Winter night',f:v=>scene(darkNight,v)},
+ {n:'Christmas tree',f:v=>scene(darkTree,v)},
+ {n:'Snowman',f:v=>scene(darkSnowman,v)},
+ {n:'Snowflake',f:v=>{
+   const lv=v+2,o=[];
+   for(let a=0;a<6;a++){
+     const th=a*Math.PI/3,c=Math.cos(th),sn=Math.sin(th),rot=([x,y])=>[x*c-y*sn,x*sn+y*c];
+     const arm=[[0,0]];
+     for(let j=0;j<lv;j++){
+       const h=.14+.62*j/(lv-1),l=.34*(1-.6*h/.8),bx=l*Math.sin(Math.PI/3),by=l*Math.cos(Math.PI/3);
+       arm.push([0,h],[bx,h+by],[0,h],[-bx,h+by],[0,h]);
+     }
+     arm.push([0,.9],[0,0]);
+     for(const q of arm)o.push(rot(q));
+   }
+   return o}},
+ {n:'Wreath',f:v=>{const passes=v+1,m=22+4*v,N=passes*m*14,o=[];for(let i=0;i<=N;i++){const f=i/N,a=f*TAU*passes,r=.62+.26*f+.05*Math.sin(m*a)+.025*Math.sin(2.7*m*a+1);o.push([r*Math.cos(a),r*Math.sin(a)])}return o}},
+ {n:'Maple leaf',f:v=>{
+   const L=[[90,.85,27],[38,.72,25],[142,.72,25],[-28,.46,23],[208,.46,23]],o=[],N=3000,teeth=34;
+   const rr=th=>{let r=.3;for(const [ang,len,w] of L){let d=Math.abs(((th-ang+540)%360)-180);if(d<w)r=Math.max(r,.3+(len-.3)*Math.pow(1-d/w,.7))}return r*(1+.05*Math.abs(Math.sin(teeth*th*Math.PI/180/2)))};
+   for(let i=0;i<=N;i++){const th=-90+i/N*360,r=rr(th)*1.05;o.push([r*Math.cos(th*Math.PI/180),r*Math.sin(th*Math.PI/180)+.0])}
+   o.push([0,0]);
+   for(const [ang,len] of L){const t=ang*Math.PI/180,e=.8*len;o.push([e*Math.cos(t),e*Math.sin(t)],[0,0])}
+   o.push([0,-.12],[0,-.55],[0,-.12]);
+   return fitTo(o,.9)}},
+ {n:'Oak leaf',f:v=>{
+   const N=700,w=y=>.38*Math.pow(Math.sin(Math.PI*y),.6)*(.4+.6*Math.abs(Math.cos(5*Math.PI*y))),Y=y=>-.8+1.6*y,o=[],rot=([x,y])=>[x*Math.cos(.45)-y*Math.sin(.45),x*Math.sin(.45)+y*Math.cos(.45)];
+   const pts=[];
+   for(let i=0;i<=N;i++){const y=i/N;pts.push([-w(y),Y(y)])}
+   for(let i=N;i>=0;i--){const y=i/N;pts.push([w(y),Y(y)])}
+   pts.push([0,Y(0)]);
+   for(let j=1;j<=5;j++){const y=(j-.5)/5.4+.02;pts.push([0,Y(y)],[.8*w(y+.06),Y(y+.06)],[0,Y(y)],[-.8*w(y+.06),Y(y+.06)],[0,Y(y)])}
+   pts.push([0,Y(.97)],[0,Y(0)]);
+   for(const q of pts)o.push(rot(q));
+   return o}},
+ {n:'Autumn tree',f:v=>scene(darkAutumn,v)}
+);
 let patIdx=0,patPts=[],PW2=0;
 const ppx=$('ppv').getContext('2d');
 function plotPolar(c,size,pts,lw){
@@ -613,7 +758,7 @@ function initPatterns(){
     const b=document.createElement('button');b.className='pt'+(i===patIdx?' sel':'');b.title=p.n;b.setAttribute('aria-label',p.n);
     const cv=document.createElement('canvas');cv.width=cv.height=Math.round(54*d);cv.style.width=cv.style.height='54px';
     const c=cv.getContext('2d');c.setTransform(d,0,0,d,0,0);plotPolar(c,54,polarize(p.f(3),0.03),1);
-    b.appendChild(cv);
+    b.appendChild(cv);b.appendChild(document.createTextNode(p.n));
     b.onclick=()=>{patIdx=i;[...g.children].forEach((x,j)=>x.classList.toggle('sel',j===i));buildPat()};
     g.appendChild(b);
   });
