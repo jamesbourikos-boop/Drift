@@ -105,7 +105,7 @@ input[type=color]{width:64px;height:44px;border:1px solid var(--bd);background:v
 <canvas id="prev"></canvas>
 <p id="imginfo">Pick a bold, high-contrast picture such as a face or a logo. Darker areas get stronger waves in the sand.</p>
 <div class="row"><button id="sendimg" disabled>Send image</button><button id="saveimg" class="alt">Save as pattern file (.txt)</button></div>
-<p><small>Version 25. Unofficial and at your own risk. Protocol from the Drifted project docs. Tested on a 21 inch table (ST-400).</small></p>
+<p><small>Version 26. Unofficial and at your own risk. Protocol from the Drifted project docs. Tested on a 21 inch table (ST-400).</small></p>
 <script>
 const SVC='0000ffe0-0000-1000-8000-00805f9b34fb',WR='0000ffe9-0000-1000-8000-00805f9b34fb',NT='0000ffe4-0000-1000-8000-00805f9b34fb';
 const $=id=>document.getElementById(id);
@@ -762,6 +762,29 @@ P.push(
  {n:'Autumn tree',f:v=>scene(darkAutumn,v)}
 );
 
+const inPoly=(x,y,V)=>{let c=false;for(let i=0,j=V.length-1;i<V.length;j=i++){const [xi,yi]=V[i],[xj,yj]=V[j];if(((yi>y)!==(yj>y))&&(x<(xj-xi)*(y-yi)/(yj-yi)+xi))c=!c}return c};
+function darkPumpkin(x,y){
+  let d=.1;
+  if(specks(x,y,10,7,.02))d=0;
+  d*=1-circ(x,y,.64,.68,.11);
+  if(y<-.78)d=.4;
+  const a=.8,b=.62,cy=-.1,e=(x/a)**2+((y-cy)/b)**2;
+  if(e<1){
+    const w=a*Math.sqrt(Math.max(.0001,1-((y-cy)/b)**2)),u=x/w;
+    d=.55;
+    for(const r of [-.66,-.33,0,.33,.66])if(Math.abs(u-r)<.035)d=.95;
+    if(e>.9)d=1;
+    if(inPoly(x,y,[[-.5,.08],[-.12,0],[-.36,.34]])||inPoly(x,y,[[.5,.08],[.12,0],[.36,.34]])||inPoly(x,y,[[0,-.02],[-.07,-.17],[.07,-.17]]))d=0;
+    const q=x/.55,yu=-.28+.2*q*q,yl=-.6+.3*q*q;
+    if(Math.abs(x)<.55&&y<yu&&y>yl){
+      d=0;
+      const i=Math.floor((x+.55)/.11);
+      if(i%2===0?y>yu-.1:y<yl+.1)d=.55;
+    }
+  }
+  if(y>.46&&y<.74&&Math.abs(x-.03*(y-.5))<.07)d=1;
+  return d;
+}
 function darkTractor(X,Y){
   const x=X/1.12,y=(Y-.05)/1.12;
   let d=.1;
@@ -782,7 +805,8 @@ function darkTractor(X,Y){
   if(fw<.17){d=fw>.12?1:(fw>.05?0:1)}
   return d;
 }
-P.push({n:'Tractor',f:v=>scene(darkTractor,v)});
+P.push({n:'Tractor',f:v=>scene(darkTractor,v)},
+ {n:'Scary pumpkin',f:v=>scene(darkPumpkin,v)});
 let patIdx=0,patPts=[],PW2=0;
 const ppx=$('ppv').getContext('2d');
 function plotPolar(c,size,pts,lw){
